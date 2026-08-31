@@ -81,71 +81,42 @@ def github_test():
     if missing:
         return jsonify({
             "success": False,
-            "error": "Missing environment variables",
             "missing": missing
         }), 500
 
     try:
-        # ----------------------------------------------------
-        # Test 1: Does GitHub recognize the token?
-        # ----------------------------------------------------
+        url = (
+            f"{GITHUB_API}/repos/"
+            f"{GITHUB_USERNAME}/"
+            f"{GITHUB_REPO}"
+        )
 
-        user_response = requests.get(
-            f"{GITHUB_API}/user",
+        response = requests.get(
+            url,
             headers=github_headers(),
             timeout=15
         )
 
-        user_result = {
-            "status_code": user_response.status_code
-        }
-
-        if user_response.status_code == 200:
-            user_data = user_response.json()
-
-            user_result["authenticated"] = True
-            user_result["github_username"] = user_data.get("login")
-
-        else:
-            user_result["authenticated"] = False
-            user_result["details"] = user_response.text
-
-        # ----------------------------------------------------
-        # Test 2: Can the token access the repository?
-        # ----------------------------------------------------
-
-        repo_response = requests.get(
-            github_api_url(""),
-            headers=github_headers(),
-            timeout=15
-        )
-
-        repo_result = {
-            "status_code": repo_response.status_code
-        }
-
-        if repo_response.status_code == 200:
-            repo_data = repo_response.json()
-
-            repo_result["accessible"] = True
-            repo_result["repository"] = repo_data.get("full_name")
-
-        else:
-            repo_result["accessible"] = False
-            repo_result["details"] = repo_response.text
-
-        # ----------------------------------------------------
-        # Final result
-        # ----------------------------------------------------
-
-        return jsonify({
-            "success": (
-                user_response.status_code == 200
-                and repo_response.status_code == 200
+        result = {
+            "github_username": GITHUB_USERNAME,
+            "repository_requested": (
+                f"{GITHUB_USERNAME}/{GITHUB_REPO}"
             ),
-            "github_user": user_result,
-            "repository": repo_result
-        })
+            "status_code": response.status_code
+        }
+
+        if response.status_code == 200:
+            repo = response.json()
+
+            result["success"] = True
+            result["github_repository"] = repo.get("full_name")
+            result["permissions"] = repo.get("permissions")
+
+        else:
+            result["success"] = False
+            result["github_response"] = response.json()
+
+        return jsonify(result)
 
     except Exception as e:
 
@@ -153,7 +124,6 @@ def github_test():
             "success": False,
             "error": str(e)
         }), 500
-
 # ============================================================
 # LEETCODE GRAPHQL
 # ============================================================
