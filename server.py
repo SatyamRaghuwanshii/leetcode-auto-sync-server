@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import re
 import html
 import requests
 import base64
@@ -13,26 +14,32 @@ CORS(app, resources={
     }
 })
 
-
 # ============================================================
 # CONFIG
 # ============================================================
 
+GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "SatyamRaghuwanshii")
-GITHUB_REPO = os.environ.get(
-    "GITHUB_REPO",
-    "YOUR_LEETCODE_SOLUTIONS_REPOSITORY"
-)
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "LeetCodeProblems")
 
 LEETCODE_GRAPHQL = "https://leetcode.com/graphql"
-
 GITHUB_API = "https://api.github.com"
 
 
 # ============================================================
-# GitHub helpers
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "success": True,
+        "message": "LeetCode Auto Sync Server is running"
+    })
+
+
+# ============================================================
+# GITHUB HELPERS
 # ============================================================
 
 def github_headers():
@@ -43,68 +50,88 @@ def github_headers():
     }
 
 
-def github_url(path):
-    return f"{GITHUB_API}/repos/{GITHUB_USERNAME}/{GITHUB_REPO}/contents/{path}"
+def github_api_url(path):
+    return f"{GITHUB_API}/repos/{GITHUB_USERNAME}/{GITHUB_REPO}/{path}"
 
 
-def github_file_exists(path):
-    response = requests.get(
-        github_url(path),
-        headers=github_headers(),
-        params={"ref": GITHUB_BRANCH},
-        timeout=15
-    )
+def check_github_config():
+    missing = []
 
-    if response.status_code == 200:
-        return response.json()
+    if not GITHUB_USERNAME:
+        missing.append("GITHUB_USERNAME")
 
-    if response.status_code == 404:
-        return None
+    if not GITHUB_TOKEN:
+        missing.append("GITHUB_TOKEN")
 
-    response.raise_for_status()
+    if not GITHUB_REPO:
+        missing.append("GITHUB_REPO")
 
-
-def create_github_file(path, content, message):
-    encoded_content = base64.b64encode(
-        content.encode("utf-8")
-    ).decode("utf-8")
-
-    response = requests.put(
-        github_url(path),
-        headers=github_headers(),
-        json={
-            "message": message,
-            "content": encoded_content,
-            "branch": GITHUB_BRANCH
-        },
-        timeout=15
-    )
-
-    response.raise_for_status()
-
-    return response.json()
+    return missing
 
 
 # ============================================================
-# LeetCode
+# TEST GITHUB CONNECTION
+# ============================================================
+
+@app.route("/github-test", methods=["GET"])
+def github_test():
+
+    missing = check_github_config()
+
+    if missing:
+        return jsonify({
+            "success": False,
+            "error": "Missing environment variables",
+            "missing": missing
+        }), 500
+
+    try:
+        response = requests.get(
+            github_api_url(""),
+            headers=github_headers(),
+            timeout=15
+        )
+
+        if response.status_code == 200:
+            repo_data = response.json()
+
+            return jsonify({
+                "success": True,
+                "message": "GitHub connection successful",
+                "repository": repo_data.get("full_name"),
+                "private": repo_data.get("private")
+            })
+
+        return jsonify({
+            "success": False,
+            "error": "GitHub authentication/repository error",
+            "status_code": response.status_code,
+            "details": response.text
+        }), response.status_code
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+# ============================================================
+# LEETCODE GRAPHQL
 # ============================================================
 
 def fetch_question(slug):
 
     query = """
     query questionData($titleSlug: String!) {
-
         question(titleSlug: $titleSlug) {
-
             questionFrontendId
             title
             titleSlug
             difficulty
             content
             isPaidOnly
-
         }
-
     }
     """
 
@@ -127,28 +154,22 @@ def fetch_question(slug):
 
     data = response.json()
 
-    question = data["data"]["question"]
-
-    if not question:
+    if not data.get("data") or not data["data"].get("question"):
         raise Exception("LeetCode question not found")
 
-    return question
+    return data["data"]["question"]
 
 
 # ============================================================
-# Create problem information
+# CREATE PROBLEM INFORMATION
 # ============================================================
 
 def create_problem(data):
 
     number = int(data["questionFrontendId"])
-
     title = data["title"]
-
     slug = data["titleSlug"]
-
     difficulty = data["difficulty"]
-
     content = data["content"]
 
     folder = f"{number:04d}-{slug}"
@@ -172,20 +193,118 @@ def create_problem(data):
 
 
 # ============================================================
-# Health check
+# CHECK WHETHER FILE EXISTS ON GITHUB
 # ============================================================
 
-@app.route("/", methods=["GET"])
-def home():
+def github_file_exists(path):
+
+    response = requests.get(
+        github_api_url(f"contents/{path}"),
+        headers=github_headers(),
+        timeout=15
+    )
+
+    if response.status_code == 200:
+        return True
+
+    if response.status_code == 404:
+        return False
+
+    raise Exception(
+        f"GitHub file check failed: "
+        f"{response.status_code} {response.text}"
+    )
+
+
+# ============================================================
+# CREATE / UPDATE FILE ON GITHUB
+# ============================================================
+
+def upload_file(path, content, commit_message):
+
+    encoded_content = base64.b64encode(
+        content.encode("utf-8")
+    ).decode("utf-8")
+
+    url = github_api_url(f"contents/{path}")
+
+    # Check if file already exists
+    response = requests.get(
+        url,
+        headers=github_headers(),
+        timeout=15
+    )
+
+    sha = None
+
+    if response.status_code == 200:
+        sha = response.json().get("sha")
+
+    elif response.status_code != 404:
+        raise Exception(
+            f"GitHub file check failed: "
+            f"{response.status_code} {response.text}"
+        )
+
+    payload = {
+        "message": commit_message,
+        "content": encoded_content
+    }
+
+    # If file exists, GitHub requires its SHA for updating
+    if sha:
+        payload["sha"] = sha
+
+    response = requests.put(
+        url,
+        headers=github_headers(),
+        json=payload,
+        timeout=20
+    )
+
+    if response.status_code not in [200, 201]:
+        raise Exception(
+            f"GitHub upload failed: "
+            f"{response.status_code} {response.text}"
+        )
+
+    return response.json()
+
+
+# ============================================================
+# OLD /SYNC ENDPOINT
+# ============================================================
+
+@app.route("/sync", methods=["POST"])
+def sync():
+
+    data = request.get_json()
+
+    print("\n============================================")
+    print("   LEETCODE SUBMISSION RECEIVED")
+    print("============================================")
+
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "No JSON data received"
+        }), 400
+
+    print("Slug:", data.get("slug"))
+    print("Language:", data.get("language"))
+    print("Status:", data.get("status"))
+    print("Runtime:", data.get("timeText"))
+    print("Memory:", data.get("spaceText"))
+    print("Submission ID:", data.get("submissionId"))
 
     return jsonify({
         "success": True,
-        "message": "LeetCode Auto Sync Server is running"
+        "message": "Submission received"
     })
 
 
 # ============================================================
-# Sync endpoint
+# SUBMISSION ENDPOINT
 # ============================================================
 
 @app.route("/submit", methods=["POST"])
@@ -194,22 +313,38 @@ def submit():
     data = request.get_json()
 
     if not data:
-
         return jsonify({
             "success": False,
             "error": "No JSON data received"
         }), 400
 
+    print("\n============================================")
+    print("       NEW LEETCODE SUBMISSION")
+    print("============================================")
 
-    print("\n========================================")
-    print("New LeetCode submission")
-    print("========================================")
-
-    print(data)
-
+    print("Slug:", data.get("slug"))
+    print("Status:", data.get("status"))
+    print("Language:", data.get("language"))
+    print("Runtime:", data.get("runtime"))
+    print("Memory:", data.get("memory"))
 
     # ========================================================
-    # Only save accepted submissions
+    # CHECK GITHUB CONFIGURATION
+    # ========================================================
+
+    missing = check_github_config()
+
+    if missing:
+        print("Missing environment variables:", missing)
+
+        return jsonify({
+            "success": False,
+            "error": "GitHub environment variables are missing",
+            "missing": missing
+        }), 500
+
+    # ========================================================
+    # ONLY ACCEPTED SUBMISSIONS
     # ========================================================
 
     if data.get("status") != "Accepted":
@@ -223,253 +358,218 @@ def submit():
             "message": "Submission not accepted. Nothing pushed."
         })
 
-
     # ========================================================
-    # Required fields
+    # REQUIRED DATA
     # ========================================================
 
     slug = data.get("slug")
-
     code = data.get("code")
 
     runtime = data.get("runtime", "")
-
     runtime_percentile = data.get(
         "runtimePercentile",
         ""
     )
 
     memory = data.get("memory", "")
-
     memory_percentile = data.get(
         "memoryPercentile",
         ""
     )
 
-    submission_id = data.get(
-        "submissionId",
-        ""
-    )
-
-
-    if not slug or not code:
-
+    if not slug:
         return jsonify({
             "success": False,
-            "error": "Missing slug or code"
+            "error": "Missing slug"
         }), 400
 
-
-    # ========================================================
-    # Check GitHub configuration
-    # ========================================================
-
-    if not GITHUB_TOKEN:
-
+    if not code:
         return jsonify({
             "success": False,
-            "error": "GITHUB_TOKEN is not configured"
-        }), 500
-
+            "error": "Missing code"
+        }), 400
 
     # ========================================================
-    # Get LeetCode problem information
+    # GET LEETCODE QUESTION
     # ========================================================
 
     try:
+
+        print("\nFetching question from LeetCode...")
 
         question = fetch_question(slug)
 
+        print(
+            "Question:",
+            question["questionFrontendId"],
+            question["title"]
+        )
+
     except Exception as e:
 
-        print(
-            "LeetCode API error:",
-            e
-        )
+        print("LeetCode API error:", e)
 
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": f"LeetCode API error: {str(e)}"
         }), 500
 
-
-    problem = create_problem(question)
-
-
     # ========================================================
-    # Don't overwrite existing solution
+    # CREATE PROBLEM
     # ========================================================
 
     try:
 
-        existing_file = github_file_exists(
-            problem["java_path"]
-        )
+        problem = create_problem(question)
 
     except Exception as e:
 
-        print(
-            "GitHub check error:",
-            e
-        )
+        print("Problem creation error:", e)
 
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
+    print("\nFolder:", problem["folder"])
+    print("Java file:", problem["java_path"])
+    print("README:", problem["readme_path"])
 
-    if existing_file:
+    # ========================================================
+    # CHECK FOR EXISTING SOLUTION
+    # ========================================================
 
-        print(
-            "\nSolution already exists:"
-        )
+    try:
 
-        print(
-            problem["java_path"]
-        )
+        if github_file_exists(problem["java_path"]):
+
+            print("\nSolution already exists on GitHub.")
+
+            return jsonify({
+                "success": False,
+                "error": "Solution already exists",
+                "folder": problem["folder"]
+            }), 409
+
+    except Exception as e:
+
+        print("GitHub file check error:", e)
 
         return jsonify({
             "success": False,
-            "error": "Solution already exists"
-        }), 409
-
+            "error": str(e)
+        }), 500
 
     # ========================================================
-    # Create README
+    # CREATE README
     # ========================================================
 
     readme = (
-        f'<h2>'
-        f'<a href="https://leetcode.com/problems/'
+        f'<h2><a href="https://leetcode.com/problems/'
         f'{problem["slug"]}">'
         f'{problem["number"]}. '
         f'{html.escape(problem["title"])}'
-        f'</a>'
-        f'</h2>'
-
-        f'<h3>'
-        f'{problem["difficulty"]}'
-        f'</h3>'
-
+        f'</a></h2>'
+        f'<h3>{problem["difficulty"]}</h3>'
         f'<hr>'
-
         f'{problem["content"]}\n'
     )
 
-
     # ========================================================
-    # Commit Java solution
+    # COMMIT MESSAGE
     # ========================================================
 
     commit_message = (
         f"Time: {runtime} "
         f"({runtime_percentile}), "
         f"Space: {memory} "
-        f"({memory_percentile}) - LeetHub"
+        f"({memory_percentile}) - "
+        f"Satyam's leet extension"
     )
 
+    print("\nCommit:")
+    print(commit_message)
 
-    print(
-        "\nUploading Java solution..."
-    )
+    # ========================================================
+    # UPLOAD JAVA FILE
+    # ========================================================
 
     try:
 
-        create_github_file(
+        print("\nUploading Java solution to GitHub...")
+
+        java_result = upload_file(
             problem["java_path"],
             code,
             commit_message
         )
 
+        print("Java solution uploaded successfully.")
+
     except Exception as e:
 
-        print(
-            "GitHub Java upload error:",
-            e
-        )
+        print("Java upload error:", e)
 
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
-
     # ========================================================
-    # Commit README
+    # UPLOAD README
     # ========================================================
-
-    print(
-        "Uploading README..."
-    )
 
     try:
 
-        create_github_file(
+        print("\nUploading README to GitHub...")
+
+        readme_result = upload_file(
             problem["readme_path"],
             readme,
-            f"Add README for {problem['number']}. {problem['title']}"
+            commit_message
         )
+
+        print("README uploaded successfully.")
 
     except Exception as e:
 
-        print(
-            "GitHub README upload error:",
-            e
-        )
+        print("README upload error:", e)
 
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
-
     # ========================================================
-    # Done
+    # SUCCESS
     # ========================================================
 
-    print(
-        "\n🎉 Successfully pushed to GitHub!"
-    )
+    print("\n============================================")
+    print("       SUCCESSFULLY SYNCED TO GITHUB")
+    print("============================================")
 
     return jsonify({
-
         "success": True,
-
+        "message": "Solution successfully pushed to GitHub",
         "folder": problem["folder"],
-
-        "commit": commit_message,
-
-        "submissionId": submission_id
-
+        "javaFile": problem["java_path"],
+        "readmeFile": problem["readme_path"],
+        "commit": commit_message
     })
 
 
 # ============================================================
-# Server
+# SERVER
 # ============================================================
 
 if __name__ == "__main__":
 
-    print(
-        "============================================"
-    )
-
-    print(
-        "   LeetCode → GitHub Auto Sync Server"
-    )
-
-    print(
-        "============================================"
-    )
+    print("============================================")
+    print("   LeetCode → GitHub Auto Sync Server")
+    print("============================================")
 
     app.run(
         host="0.0.0.0",
-        port=int(
-            os.environ.get(
-                "PORT",
-                8763
-            )
-        ),
+        port=int(os.environ.get("PORT", 10000)),
         debug=False
     )
