@@ -86,35 +86,73 @@ def github_test():
         }), 500
 
     try:
-        response = requests.get(
+        # ----------------------------------------------------
+        # Test 1: Does GitHub recognize the token?
+        # ----------------------------------------------------
+
+        user_response = requests.get(
+            f"{GITHUB_API}/user",
+            headers=github_headers(),
+            timeout=15
+        )
+
+        user_result = {
+            "status_code": user_response.status_code
+        }
+
+        if user_response.status_code == 200:
+            user_data = user_response.json()
+
+            user_result["authenticated"] = True
+            user_result["github_username"] = user_data.get("login")
+
+        else:
+            user_result["authenticated"] = False
+            user_result["details"] = user_response.text
+
+        # ----------------------------------------------------
+        # Test 2: Can the token access the repository?
+        # ----------------------------------------------------
+
+        repo_response = requests.get(
             github_api_url(""),
             headers=github_headers(),
             timeout=15
         )
 
-        if response.status_code == 200:
-            repo_data = response.json()
+        repo_result = {
+            "status_code": repo_response.status_code
+        }
 
-            return jsonify({
-                "success": True,
-                "message": "GitHub connection successful",
-                "repository": repo_data.get("full_name"),
-                "private": repo_data.get("private")
-            })
+        if repo_response.status_code == 200:
+            repo_data = repo_response.json()
+
+            repo_result["accessible"] = True
+            repo_result["repository"] = repo_data.get("full_name")
+
+        else:
+            repo_result["accessible"] = False
+            repo_result["details"] = repo_response.text
+
+        # ----------------------------------------------------
+        # Final result
+        # ----------------------------------------------------
 
         return jsonify({
-            "success": False,
-            "error": "GitHub authentication/repository error",
-            "status_code": response.status_code,
-            "details": response.text
-        }), response.status_code
+            "success": (
+                user_response.status_code == 200
+                and repo_response.status_code == 200
+            ),
+            "github_user": user_result,
+            "repository": repo_result
+        })
 
     except Exception as e:
+
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
-
 
 # ============================================================
 # LEETCODE GRAPHQL
