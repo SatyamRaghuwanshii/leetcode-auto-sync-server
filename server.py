@@ -70,61 +70,6 @@ def check_github_config():
 
 
 # ============================================================
-# TEST GITHUB CONNECTION
-# ============================================================
-
-@app.route("/github-test", methods=["GET"])
-def github_test():
-
-    missing = check_github_config()
-
-    if missing:
-        return jsonify({
-            "success": False,
-            "missing": missing
-        }), 500
-
-    try:
-        url = (
-            f"{GITHUB_API}/repos/"
-            f"{GITHUB_USERNAME}/"
-            f"{GITHUB_REPO}"
-        )
-
-        response = requests.get(
-            url,
-            headers=github_headers(),
-            timeout=15
-        )
-
-        result = {
-            "github_username": GITHUB_USERNAME,
-            "repository_requested": (
-                f"{GITHUB_USERNAME}/{GITHUB_REPO}"
-            ),
-            "status_code": response.status_code
-        }
-
-        if response.status_code == 200:
-            repo = response.json()
-
-            result["success"] = True
-            result["github_repository"] = repo.get("full_name")
-            result["permissions"] = repo.get("permissions")
-
-        else:
-            result["success"] = False
-            result["github_response"] = response.json()
-
-        return jsonify(result)
-
-    except Exception as e:
-
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-# ============================================================
 # LEETCODE GRAPHQL
 # ============================================================
 
